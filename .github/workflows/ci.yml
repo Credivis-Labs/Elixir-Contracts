@@ -22,11 +22,12 @@ jobs:
 
       - name: fmt
         run: cargo fmt --all -- --check
-      - name: clippy
-        run: cargo clippy --all-targets -- -D warnings
-      # Wasm first: the factory tests deploy the real sub-account Wasm by hash.
+      # Wasm first: the factory tests include_bytes! the real sub-account Wasm
+      # and deploy it by hash, and clippy --all-targets compiles those tests.
       - name: build wasm
         run: cargo build --target wasm32v1-none --release
+      - name: clippy
+        run: cargo clippy --all-targets -- -D warnings
       - name: test
         run: cargo test --all
 
