@@ -7,6 +7,7 @@ members = [
     "contracts/elixir_queue",
     "contracts/policies/destination_allowlist",
     "contracts/policies/timelock",
+    "contracts/policies/session_key",
     "packages/elixir_types",
 ]
 
