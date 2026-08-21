@@ -24,10 +24,11 @@ jobs:
         run: cargo fmt --all -- --check
       - name: clippy
         run: cargo clippy --all-targets -- -D warnings
-      - name: test
-        run: cargo test --all
+      # Wasm first: the factory tests deploy the real sub-account Wasm by hash.
       - name: build wasm
         run: cargo build --target wasm32v1-none --release
+      - name: test
+        run: cargo test --all
 
       # Publish hashes so anyone can verify deployed Wasm matches audited source.
       # docs/GAPS.md D.
