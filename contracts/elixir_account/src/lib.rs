@@ -88,9 +88,12 @@ impl ElixirAccount {
 
     /// Queue path. Called by elixir_queue after threshold + timelock are satisfied.
     ///
-    /// Reentrancy: the caller (elixir_queue) MUST mark the proposal Executed before
-    /// invoking this. The lock here is defense in depth against a hostile target
-    /// calling back in. See docs/GAPS.md B3.
+    /// Reentrancy: the Soroban host already refuses to invoke a contract that is
+    /// on the call stack, and the queue marks the proposal Executed before calling
+    /// this. The lock here is a third layer; it costs one temporary entry and
+    /// would hold on its own if the host rule were ever relaxed. On a failure path
+    /// it needs no clearing — the transaction reverts and takes it along.
+    /// See docs/EXECUTION.md.
     pub fn exec_queued(
         e: Env,
         target: Address,
