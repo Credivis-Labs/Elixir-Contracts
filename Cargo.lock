@@ -710,6 +710,7 @@ dependencies = [
 name = "elixir_queue"
 version = "0.1.0"
 dependencies = [
+ "elixir_account",
  "elixir_types",
  "soroban-sdk",
 ]
