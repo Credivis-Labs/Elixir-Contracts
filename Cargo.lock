@@ -1512,6 +1512,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "session_key"
+version = "0.1.0"
+dependencies = [
+ "elixir_types",
+ "soroban-sdk",
+]
+
+[[package]]
 name = "sha2"
 version = "0.10.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"

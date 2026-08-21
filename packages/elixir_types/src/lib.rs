@@ -1,6 +1,6 @@
 #![no_std]
 
-use soroban_sdk::{contracterror, contracttype, Address, Env, Symbol, Val, Vec};
+use soroban_sdk::{auth::Context, contracterror, contracttype, Address, Env, Symbol, Val, Vec};
 
 /// Bumped on any signer / threshold / policy / rule mutation.
 /// Stamped onto every proposal at creation; `execute` rejects a mismatch.
@@ -66,6 +66,33 @@ pub trait AccountInterface {
     fn exec_queued(e: Env, target: Address, fn_name: Symbol, args: Vec<Val>) -> Val;
 }
 
+/// Policy contract interface.
+///
+/// Shaped after OpenZeppelin `stellar-accounts::policies::Policy` so these can
+/// be attached to OZ context rules once that crate supports soroban-sdk 27
+/// (#7). Differences, all deliberate: `rule_id` stands in for OZ's
+/// `ContextRule` struct, and `authenticated_signers` carries addresses rather
+/// than OZ's `Signer` enum — both because the OZ types cannot be shared across
+/// SDK versions today. Translating at the call site is mechanical.
+///
+/// Contract for implementors:
+///   * `enforce` panics to deny. Any state change it makes (spend decrement,
+///     consuming a scheduled slot) happens BEFORE it returns, never after.
+///   * `install` / `uninstall` / `enforce` all require `smart_account`'s auth.
+///   * A policy that cannot evaluate a context denies it. Fail closed.
+#[soroban_sdk::contractclient(name = "PolicyClient")]
+pub trait PolicyInterface {
+    fn enforce(
+        e: Env,
+        smart_account: Address,
+        rule_id: u32,
+        context: Context,
+        authenticated_signers: Vec<Address>,
+    );
+    fn install(e: Env, smart_account: Address, rule_id: u32, params: Val);
+    fn uninstall(e: Env, smart_account: Address, rule_id: u32);
+}
+
 /// Role bitmask. A compromised proposer key must not be able to approve.
 pub const ROLE_INITIATE: u32 = 1;
 pub const ROLE_VOTE: u32 = 2;
@@ -94,4 +121,13 @@ pub enum Error {
     EmptyProposal = 14,
     ProposalNotFound = 15,
     NotAMember = 16,
+    /// The policy denies this context.
+    PolicyViolation = 17,
+    /// Timelock: nothing was scheduled for this payload.
+    NotScheduled = 18,
+    SpendCapExceeded = 19,
+    SessionExpired = 20,
+    AllowlistTooLarge = 21,
+    /// The policy has no installation for this (account, rule).
+    PolicyNotInstalled = 22,
 }
