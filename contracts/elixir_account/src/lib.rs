@@ -14,7 +14,7 @@
 //!
 //! Before implementing: resolve the week-one spikes in docs/GAPS.md §F3.
 
-use elixir_types::{ConfigEpoch, Error};
+use elixir_types::{AccountConfig, ConfigEpoch, Error};
 use soroban_sdk::{
     contract, contractevent, contractimpl, contracttype, panic_with_error, Address, Env, Symbol,
     Val, Vec,
@@ -50,19 +50,8 @@ pub enum DataKey {
     ExecLock,
 }
 
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct Config {
-    pub config_epoch: ConfigEpoch,
-    /// Seconds between approval settling and execution eligibility.
-    pub time_lock: u32,
-    /// elixir_queue address, if the queue module is enabled.
-    pub queue: Option<Address>,
-    /// Next sub-account index.
-    pub subaccounts: u32,
-    /// Ledger timestamp until which non-config execution is halted. 0 = not frozen.
-    pub frozen_until: u64,
-}
+/// Re-exported from elixir_types so the queue and account agree on one shape.
+pub type Config = AccountConfig;
 
 const DAY_IN_LEDGERS: u32 = 17280;
 const INSTANCE_LIFETIME_THRESHOLD: u32 = 30 * DAY_IN_LEDGERS;
