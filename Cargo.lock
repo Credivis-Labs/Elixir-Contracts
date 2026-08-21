@@ -702,6 +702,7 @@ dependencies = [
 name = "elixir_factory"
 version = "0.1.0"
 dependencies = [
+ "elixir_subaccount",
  "elixir_types",
  "soroban-sdk",
 ]

@@ -15,3 +15,6 @@ elixir_types = { workspace = true }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
+
+[dev-dependencies.elixir_subaccount]
+path = "../elixir_subaccount"
