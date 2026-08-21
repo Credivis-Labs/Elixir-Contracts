@@ -408,3 +408,4 @@ fn bump_instance(e: &Env) {
 }
 
 mod test;
+mod test_reentrancy;
