@@ -2,22 +2,36 @@
 
 //! elixir_account — the Elixir smart account.
 //!
-//! Scaffold. `__check_auth` is intentionally NOT implemented here: the plan
-//! (docs/ARCHITECTURE.md §3) is to extend OpenZeppelin `stellar-contracts/accounts`
-//! rather than reimplement threshold and spending-limit policies. This crate holds
-//! the Elixir-specific state that OZ does not provide:
+//! Signer storage extends OpenZeppelin `stellar-contracts/accounts` rather than
+//! reimplementing threshold and spending-limit policies (docs/ARCHITECTURE.md §3).
+//! This crate holds the Elixir-specific state that OZ does not provide:
 //!
 //!   - config_epoch          proposal invalidation on config change
 //!   - reconfigure()         atomic signer+threshold update (never expose raw add_signer)
 //!   - freeze                emergency halt  (docs/GAPS.md A2)
 //!   - last_activity         dead-man switch input  (docs/GAPS.md A1)
 //!
-//! Before implementing: resolve the week-one spikes in docs/GAPS.md §F3.
+//! `__check_auth` is still NOT implemented. Signers are stored and the threshold is
+//! recorded, but nothing verifies signatures against them yet — that is #7, blocked
+//! on the C-account simulation spike (#1). Storing a signer set is deliberately
+//! separable from verifying it, which is why the first half could land early.
+//!
+//! Until `__check_auth` exists this account cannot authorize anything on its own:
+//! `reconfigure`, `freeze`, and `unfreeze` all self-auth and so are unreachable
+//! on-network. They are exercised in tests via `mock_all_auths`.
+//!
+//! Also outstanding before this is safe to deploy: the context-rule downgrade guard
+//! (#8). OZ lets the *client* choose which rule to evaluate, so a permissive rule
+//! must never be satisfiable for a context a stricter rule was meant to govern.
 
 use elixir_types::{AccountConfig, ConfigEpoch, Error};
 use soroban_sdk::{
-    contract, contractevent, contractimpl, contracttype, panic_with_error, Address, Env, Symbol,
-    Val, Vec,
+    contract, contractevent, contractimpl, contracttype, panic_with_error, Address, Env, Map,
+    String, Symbol, Val, Vec,
+};
+use stellar_accounts::smart_account::{
+    add_context_rule, batch_add_signer, get_context_rule, get_context_rules_count, remove_signer,
+    ContextRule, ContextRuleType, Signer,
 };
 
 /// Soroban RPC retains events for days, not forever — the audit trail must come
@@ -48,6 +62,14 @@ pub enum DataKey {
     LastActivity,
     /// Set while an external invocation is in flight. Reentrancy guard.
     ExecLock,
+    /// Approval threshold per context rule.
+    ///
+    /// Held here rather than in OZ's `simple_threshold` policy contract because
+    /// that policy requires a cross-contract install against a deployed policy
+    /// address. Keeping it local lets `reconfigure` validate signers and threshold
+    /// in one atomic step. When `__check_auth` lands (#7) this either moves behind
+    /// the policy or stays as the source of truth the policy reads.
+    Threshold(u32),
 }
 
 /// Re-exported from elixir_types so the queue and account agree on one shape.
@@ -130,17 +152,29 @@ impl ElixirAccount {
     /// a signer-set change that leaves the threshold stale can render the account
     /// permanently unsatisfiable. See docs/ARCHITECTURE.md §6.5.
     ///
+    /// This is the whole reason the method takes both halves at once. OZ's
+    /// `simple_threshold` explicitly does NOT update the threshold when a signer
+    /// set changes — its own docs warn that an administrator must call
+    /// `set_threshold` manually "to avoid DoS or security degradation". Splitting
+    /// that across two calls is the bug; validating both together is the fix.
+    ///
     /// Requires self-auth, so it routes through __check_auth under the
     /// config-scoped context rule.
-    pub fn reconfigure(e: Env, rule_id: u32, signer_count: u32, threshold: u32) {
+    ///
+    /// The threshold is validated and recorded here, but not yet *enforced* —
+    /// enforcement is `__check_auth`, which is #7 and blocked on the C-account
+    /// simulation spike (#1). Storing signers is deliberately separable from
+    /// verifying their signatures.
+    pub fn reconfigure(e: Env, rule_id: u32, signers: Vec<Signer>, threshold: u32) {
         e.current_contract_address().require_auth();
 
+        let signer_count = signers.len();
         if threshold == 0 || threshold > signer_count {
             panic_with_error!(&e, Error::UnsatisfiableThreshold);
         }
 
-        // apply_signers(&e, rule_id, &signers);
-        // apply_threshold(&e, rule_id, threshold);
+        apply_signers(&e, rule_id, &signers);
+        set_threshold(&e, rule_id, threshold);
 
         bump_config_epoch(&e);
         touch_activity(&e);
@@ -151,6 +185,19 @@ impl ElixirAccount {
             config_epoch: load_config(&e).config_epoch,
         }
         .publish(&e);
+    }
+
+    /// Signers currently attached to a context rule.
+    pub fn signers(e: Env, rule_id: u32) -> Vec<Signer> {
+        get_context_rule(&e, rule_id).signers
+    }
+
+    /// Threshold recorded for a context rule. 0 = unset.
+    pub fn threshold(e: Env, rule_id: u32) -> u32 {
+        e.storage()
+            .instance()
+            .get(&DataKey::Threshold(rule_id))
+            .unwrap_or(0)
     }
 
     /// Emergency halt. Deliberately low threshold (1-of-N) via its own context rule:
@@ -208,6 +255,50 @@ fn load_config(e: &Env) -> Config {
 
 fn is_frozen(e: &Env, cfg: &Config) -> bool {
     cfg.frozen_until > e.ledger().timestamp()
+}
+
+/// Replace the signer set on `rule_id`, creating the rule on first use.
+///
+/// Replace, not append. `reconfigure` states the new signer set in full, and the
+/// threshold is validated against `signers.len()` — appending would let the stored
+/// count drift above the number the threshold was checked against, and would hit
+/// OZ's MAX_SIGNERS (15) after a few calls.
+///
+/// Insertion happens before removal: OZ rejects a rule that is momentarily empty
+/// (NoSignersAndPolicies), so the old set cannot be cleared first. The cost is that
+/// the two sets coexist briefly, so a rotation is bounded by MAX_SIGNERS across
+/// *both* sets — old + new must not exceed 15. Rotating a full 15-signer set in one
+/// call is therefore not possible; that is an OZ constraint, not an Elixir one.
+///
+/// OZ registers signers per context rule and rejects canonical duplicates, so a
+/// repeated key panics rather than silently inflating the signer count against
+/// the threshold.
+fn apply_signers(e: &Env, rule_id: u32, signers: &Vec<Signer>) {
+    if rule_id < get_context_rules_count(e) {
+        let previous = get_context_rule(e, rule_id).signer_ids;
+        batch_add_signer(e, rule_id, signers);
+        for signer_id in previous.iter() {
+            remove_signer(e, rule_id, signer_id);
+        }
+    } else {
+        let rule: ContextRule = add_context_rule(
+            e,
+            &ContextRuleType::Default,
+            &String::from_str(e, "elixir"),
+            None,
+            signers,
+            &Map::new(e),
+        );
+        if rule.id != rule_id {
+            panic_with_error!(e, Error::Unauthorized);
+        }
+    }
+}
+
+fn set_threshold(e: &Env, rule_id: u32, threshold: u32) {
+    e.storage()
+        .instance()
+        .set(&DataKey::Threshold(rule_id), &threshold);
 }
 
 fn bump_config_epoch(e: &Env) {
