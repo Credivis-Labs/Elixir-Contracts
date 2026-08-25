@@ -21,6 +21,22 @@ repository = "https://github.com/Credivis-Labs/Elixir-Contracts"
 soroban-sdk = "27.0.6"
 elixir_types = { path = "packages/elixir_types" }
 
+# OpenZeppelin smart-account primitives (#7).
+#
+# Pinned to a git rev, not crates.io, deliberately. No published version supports
+# soroban-sdk 27: every release up to 0.7.2 pins ^26.1.0 or older, and every tag
+# including v0.8.0-rc.3 is on sdk 26.x. The 27.0.2 bump landed in ec749c3
+# (2026-07-27), after the newest rc, so only untagged main carries it.
+#
+# Depending on crates.io 0.7.2 co-resolves two SDKs (26.1.1 alongside our 27.0.6)
+# plus duplicate stellar-xdr. That is fatal, not cosmetic: OZ's Signer and Context
+# would be distinct types from ours and would not unify at the __check_auth
+# boundary.
+#
+# Never use `branch`; the rev must be explicit so the audited source cannot shift.
+# Swap to a crates.io release once 0.8.0 ships on sdk 27 — re-evaluate under #14.
+stellar-accounts = { git = "https://github.com/OpenZeppelin/stellar-contracts", rev = "fbfde38" }
+
 [profile.release]
 opt-level = "z"
 overflow-checks = true

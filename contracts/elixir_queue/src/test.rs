@@ -9,6 +9,18 @@ use soroban_sdk::{
     vec, Address, Env, Vec,
 };
 
+/// Bump the account's config_epoch. These tests care only that a reconfigure
+/// happened, not about the signer set, so any valid set will do.
+fn reconfigure_account(e: &Env, account: &Address) {
+    let mut s = Vec::new(e);
+    for _ in 0..3 {
+        s.push_back(stellar_accounts::smart_account::Signer::Delegated(
+            Address::generate(e),
+        ));
+    }
+    elixir_account::ElixirAccountClient::new(e, account).reconfigure(&0, &s, &2);
+}
+
 // A target with observable state, so tests can prove an invocation ran (or did not).
 #[contract]
 pub struct Counter;
@@ -197,7 +209,7 @@ fn stale_epoch_cannot_execute() {
     assert_eq!(f.queue.get_proposal(&id).status, Status::Approved);
 
     // The account reconfigures; its epoch bumps; the proposal is now stale.
-    elixir_account::ElixirAccountClient::new(&e, &f.account).reconfigure(&0, &4, &2);
+    reconfigure_account(&e, &f.account);
 
     assert_err(f.queue.try_execute(&f.carol, &id), Error::StaleConfigEpoch);
     assert_eq!(count(&f), 0);
@@ -207,7 +219,7 @@ fn stale_epoch_cannot_execute() {
 fn proposal_created_after_reconfigure_carries_new_epoch() {
     let e = Env::default();
     let f = fixture(&e, 1, 0);
-    elixir_account::ElixirAccountClient::new(&e, &f.account).reconfigure(&0, &4, &2);
+    reconfigure_account(&e, &f.account);
     let id = f.queue.propose(&f.alice, &None, &bump_invocation(&f));
     assert_eq!(f.queue.get_proposal(&id).config_epoch, 1);
     f.queue.execute(&f.alice, &id);
