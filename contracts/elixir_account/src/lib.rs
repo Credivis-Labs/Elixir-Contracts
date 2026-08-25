@@ -261,23 +261,41 @@ fn is_frozen(e: &Env, cfg: &Config) -> bool {
 ///
 /// Replace, not append. `reconfigure` states the new signer set in full, and the
 /// threshold is validated against `signers.len()` — appending would let the stored
-/// count drift above the number the threshold was checked against, and would hit
-/// OZ's MAX_SIGNERS (15) after a few calls.
+/// count drift above the number the threshold was checked against.
 ///
-/// Insertion happens before removal: OZ rejects a rule that is momentarily empty
-/// (NoSignersAndPolicies), so the old set cannot be cleared first. The cost is that
-/// the two sets coexist briefly, so a rotation is bounded by MAX_SIGNERS across
-/// *both* sets — old + new must not exceed 15. Rotating a full 15-signer set in one
-/// call is therefore not possible; that is an OZ constraint, not an Elixir one.
+/// Applied as a delta: only signers that are genuinely new are added, and only
+/// signers genuinely dropped are removed. Re-adding a signer the rule already
+/// holds is not idempotent in OZ — `batch_add_signer` validates the combined
+/// old+new set and panics `DuplicateSigner` on a repeated canonical key, so a
+/// rotation that keeps any signer would revert. Diffing avoids that, and it also
+/// means the transient peak is the union of the two sets rather than their sum,
+/// so `MAX_SIGNERS` only bounds what the rule actually ends up holding.
 ///
-/// OZ registers signers per context rule and rejects canonical duplicates, so a
-/// repeated key panics rather than silently inflating the signer count against
-/// the threshold.
+/// Additions still precede removals: OZ rejects a momentarily-empty rule
+/// (`NoSignersAndPolicies`), so the old set cannot be cleared first.
 fn apply_signers(e: &Env, rule_id: u32, signers: &Vec<Signer>) {
     if rule_id < get_context_rules_count(e) {
-        let previous = get_context_rule(e, rule_id).signer_ids;
-        batch_add_signer(e, rule_id, signers);
-        for signer_id in previous.iter() {
+        let rule = get_context_rule(e, rule_id);
+
+        let mut to_add: Vec<Signer> = Vec::new(e);
+        for signer in signers.iter() {
+            if !rule.signers.contains(&signer) {
+                to_add.push_back(signer);
+            }
+        }
+
+        let mut to_remove: Vec<u32> = Vec::new(e);
+        for (i, existing) in rule.signers.iter().enumerate() {
+            if !signers.contains(&existing) {
+                // `signer_ids` is positionally aligned with `signers`.
+                to_remove.push_back(rule.signer_ids.get_unchecked(i as u32));
+            }
+        }
+
+        if !to_add.is_empty() {
+            batch_add_signer(e, rule_id, &to_add);
+        }
+        for signer_id in to_remove.iter() {
             remove_signer(e, rule_id, signer_id);
         }
     } else {

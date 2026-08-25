@@ -100,11 +100,11 @@ fn reconfigure_rotates_within_the_signer_cap() {
 }
 
 /// The other side of that constraint, asserted so the limit is documented by a
-/// test rather than discovered in production: rotating a full 15-signer set in one
-/// call exceeds MAX_SIGNERS transiently and reverts. Rotate in two steps instead.
-/// This is an OZ limitation, not an Elixir policy choice.
+/// test rather than discovered in production. Signers are applied as a delta, so
+/// the transient peak is the UNION of the old and new sets. Two disjoint 15-signer
+/// sets union to 30 and exceed MAX_SIGNERS; rotate in two steps instead.
 #[test]
-#[should_panic]
+#[should_panic(expected = "Error(Contract, #3010)")]
 fn reconfigure_cannot_rotate_a_full_set_in_one_call() {
     let e = Env::default();
     e.mock_all_auths();
@@ -218,23 +218,121 @@ fn unfreeze_clears_immediately() {
     assert!(!c.is_frozen());
 }
 
-/// Boundary probe for the rotation cap. Derived from OZ batch_add_signer, which
-/// validates AFTER appending: the peak is old + new, not max(old, new).
+/// Boundary probe for the rotation cap, at the union boundary.
 #[test]
-fn rotation_cap_boundary_is_old_plus_new() {
+fn rotation_cap_boundary_is_the_union_of_both_sets() {
     let e = Env::default();
     e.mock_all_auths();
 
-    // 7 + 8 = 15, exactly at MAX_SIGNERS. Must succeed.
+    // 7 + 8 disjoint = 15 union, exactly at MAX_SIGNERS. Must succeed.
     let c = setup(&e);
     c.reconfigure(&0, &signers(&e, 7), &4);
     c.reconfigure(&0, &signers(&e, 8), &5);
     assert_eq!(c.signers(&0).len(), 8);
 
-    // 8 + 8 = 16, one over. Must fail.
+    // 8 + 8 disjoint = 16 union, one over. Must fail.
     let d = setup(&e);
     d.reconfigure(&0, &signers(&e, 8), &5);
     assert!(d.try_reconfigure(&0, &signers(&e, 8), &5).is_err());
+}
+
+/// Overlap is the common case: a real rotation keeps most signers and changes a
+/// few. Applying the set wholesale would re-add the retained signers and trip
+/// OZ's DuplicateSigner check, so this must go through the delta path.
+#[test]
+fn reconfigure_keeps_overlapping_signers() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let c = setup(&e);
+
+    let a = Signer::Delegated(Address::generate(&e));
+    let b = Signer::Delegated(Address::generate(&e));
+    let d = Signer::Delegated(Address::generate(&e));
+
+    let mut first = Vec::new(&e);
+    first.push_back(a.clone());
+    first.push_back(b.clone());
+    first.push_back(d.clone());
+    c.reconfigure(&0, &first, &2);
+
+    // Drop `d`, keep `a` and `b`.
+    let mut second = Vec::new(&e);
+    second.push_back(a.clone());
+    second.push_back(b.clone());
+    c.reconfigure(&0, &second, &2);
+
+    let now = c.signers(&0);
+    assert_eq!(
+        now.len(),
+        2,
+        "retained signers must survive, dropped one must go"
+    );
+    assert!(now.contains(&a));
+    assert!(now.contains(&b));
+    assert!(!now.contains(&d), "the dropped signer must be gone");
+    assert_eq!(c.threshold(&0), 2);
+}
+
+/// A no-op reconfigure — same set, same threshold — must be accepted. The delta
+/// is empty on both sides, so nothing is added and nothing removed.
+#[test]
+fn reconfigure_with_an_unchanged_set_is_a_no_op() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let c = setup(&e);
+
+    let set = signers(&e, 3);
+    c.reconfigure(&0, &set, &2);
+    c.reconfigure(&0, &set, &2);
+
+    assert_eq!(c.signers(&0), set);
+    assert_eq!(c.threshold(&0), 2);
+}
+
+/// A full 15-signer rule cannot swap a signer in one call, even though only one
+/// changes. `batch_add_signer` validates the rule AFTER appending and BEFORE the
+/// caller removes anything, so the transient peak is 15 + 1 = 16 and trips
+/// MAX_SIGNERS. Remove first, then add — two calls. Asserted so the limit is
+/// documented rather than discovered in production.
+#[test]
+#[should_panic(expected = "Error(Contract, #3010)")]
+fn full_set_cannot_swap_a_signer_in_one_call() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let c = setup(&e);
+
+    let mut set = signers(&e, 15);
+    c.reconfigure(&0, &set, &8);
+
+    set.pop_back();
+    set.push_back(Signer::Delegated(Address::generate(&e)));
+    c.reconfigure(&0, &set, &8);
+}
+
+/// The two-step form of the above: shrink, then grow. This is the documented way
+/// to rotate a signer out of a full rule.
+#[test]
+fn full_set_swaps_a_signer_in_two_calls() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let c = setup(&e);
+
+    let mut set = signers(&e, 15);
+    c.reconfigure(&0, &set, &8);
+
+    // Step one: drop to 14. Union is 15, within the cap.
+    set.pop_back();
+    c.reconfigure(&0, &set, &8);
+    assert_eq!(c.signers(&0).len(), 14);
+
+    // Step two: add the replacement. Union is 15 again.
+    let replacement = Signer::Delegated(Address::generate(&e));
+    set.push_back(replacement.clone());
+    c.reconfigure(&0, &set, &8);
+
+    let now = c.signers(&0);
+    assert_eq!(now.len(), 15);
+    assert!(now.contains(&replacement));
 }
 
 /// The indexer reconciles `account_signers` from OZ own signer events, which
