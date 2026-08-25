@@ -22,10 +22,19 @@ jobs:
 
       - name: fmt
         run: cargo fmt --all -- --check
+
+      # elixir_account depends on OpenZeppelin stellar-accounts, whose workspace
+      # enables the soroban-sdk feature 'experimental_spec_shaking_v2'. That
+      # feature refuses to build under plain `cargo build` and requires
+      # `stellar contract build` from stellar-cli v25.2.0+. Not our setting —
+      # crates without the OZ dependency still build fine with cargo.
+      - name: install stellar-cli
+        uses: stellar/stellar-cli@v25.2.0
+
       # Wasm first: the factory tests include_bytes! the real sub-account Wasm
       # and deploy it by hash, and clippy --all-targets compiles those tests.
       - name: build wasm
-        run: cargo build --target wasm32v1-none --release
+        run: stellar contract build
       - name: clippy
         run: cargo clippy --all-targets -- -D warnings
       - name: test
